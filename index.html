@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="theme-color" content="#007aff">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="懒人日历">
@@ -40,7 +40,7 @@ body{
   color:var(--text);
   font:16px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
   -webkit-font-smoothing:antialiased;
-  padding-bottom:calc(30px + env(safe-area-inset-bottom));
+  padding-bottom:calc(100px + env(safe-area-inset-bottom));
 }
 .app{max-width:520px;margin:0 auto;padding:0 14px}
 
@@ -57,17 +57,29 @@ body{
   font-size:14px;font-weight:600;padding:7px 14px;border-radius:999px;
 }
 
-/* 输入区 */
-.composer{
-  background:var(--card);border-radius:var(--radius);padding:12px 12px 12px;
-  box-shadow:0 1px 3px rgba(0,0,0,.06);
+/* 底部固定输入栏 */
+.composer-bar{
+  position:fixed;left:0;right:0;bottom:0;z-index:40;
+  background:var(--card);border-top:1px solid var(--line);
+  padding:8px 14px calc(8px + env(safe-area-inset-bottom));
+  box-shadow:0 -2px 12px rgba(0,0,0,.07);
 }
-.composer input{
-  width:100%;border:0;outline:0;background:transparent;color:var(--text);
-  font:16px/1.5 inherit;padding:4px 2px;
+.composer-inner{max-width:520px;margin:0 auto}
+.composer-row{display:flex;gap:8px;align-items:center}
+.composer-row input{
+  flex:1;min-width:0;border:0;outline:none;
+  background:var(--bg);color:var(--text);
+  border-radius:12px;padding:11px 14px;
+  font:16px/1.4 inherit;
 }
-.composer input::placeholder{color:var(--muted)}
-.preview{font-size:13px;color:var(--muted);padding:8px 2px 10px;min-height:34px;word-break:break-word}
+.composer-row .btn{flex:0 0 auto}
+.composer-row input::placeholder{color:var(--muted)}
+.preview{
+  font-size:12.5px;color:var(--muted);
+  padding:0 4px 6px;display:none;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.preview.ok,.preview.warn,.preview.loading{display:block}
 .preview.ok{color:var(--accent)}
 .preview.warn{color:var(--warn)}
 .btn{
@@ -255,19 +267,6 @@ body{
     </div>
   </div>
 
-  <form class="composer" id="composerForm" autocomplete="off">
-    <input id="quickInput" type="text" enterkeyhint="done"
-           placeholder="明天下午3点 开会 讨论预算">
-    <div class="preview" id="preview"></div>
-    <button type="submit" class="btn primary block">记下</button>
-    <div class="chips" id="chips">
-      <button type="button" class="chip" data-example="明天下午3点 开会 讨论预算">明天下午3点 开会</button>
-      <button type="button" class="chip" data-example="下周一上午10点 交周报">下周一 交周报</button>
-      <button type="button" class="chip" data-example="11月20号 体检 空腹">11月20号 体检</button>
-    </div>
-    <div class="hint">一句话就行：时间、事情、备注用空格隔开。也可以用手机键盘上的语音键说话。</div>
-  </form>
-
   <div class="tip" id="installTip">
     <span id="installTipText">点浏览器下方「分享」→「添加到主屏幕」，下次一点就开</span>
     <button id="installTipClose">知道了</button>
@@ -318,6 +317,17 @@ body{
     <div id="ideaList"></div>
   </section>
 </div>
+
+<form class="composer-bar" id="composerForm" autocomplete="off">
+  <div class="composer-inner">
+    <div class="preview" id="preview"></div>
+    <div class="composer-row">
+      <input id="quickInput" type="text" enterkeyhint="done"
+             placeholder="明天下午3点 开会 讨论预算">
+      <button type="submit" class="btn primary">记下</button>
+    </div>
+  </div>
+</form>
 
 <div class="modal" id="modal">
   <div class="sheet">
@@ -1337,14 +1347,6 @@ body{
   });
   quickInput.addEventListener('keydown', function(e){
     if (e.key === 'Escape'){ quickInput.value = ''; updatePreview(); }
-  });
-
-  $('chips').addEventListener('click', function(e){
-    var btn = e.target.closest('.chip');
-    if (!btn) return;
-    quickInput.value = btn.getAttribute('data-example');
-    updatePreview();
-    quickInput.focus();
   });
 
   daysEl.addEventListener('click', function(e){
