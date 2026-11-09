@@ -245,6 +245,13 @@ body{
 }
 @keyframes spin{to{transform:rotate(360deg)}}
 
+/* 云同步 */
+.divider{height:1px;background:var(--line);margin:16px -16px}
+.hint-small{font-size:11.5px;color:var(--muted);margin:-3px 0 10px;line-height:1.45}
+.sync-state{font-size:12.5px;color:var(--muted);margin-top:8px;line-height:1.5;word-break:break-word}
+.sync-state.ok{color:var(--accent)}
+.sync-state.err{color:#ff3b30}
+
 /* Toast */
 .toast{
   position:fixed;left:50%;bottom:calc(26px + env(safe-area-inset-bottom));
@@ -406,7 +413,33 @@ body{
       <button class="btn ghost" id="testBtn">测试</button>
       <button class="btn primary grow" id="saveSettingsBtn">保存</button>
     </div>
-    <div class="hint" id="settingsHint">Key 只保存在这台电脑上，不会回传到手机，也不会写进网页。</div>
+    <div class="hint" id="settingsHint">Key 只保存在这台设备上，不会写进网页。</div>
+
+    <div class="divider"></div>
+
+    <div class="field switch-row">
+      <div>
+        <div class="switch-label">电脑手机同步</div>
+        <div class="switch-desc">两台设备填同一个 GitHub Token，日程自动互相同步</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="syncToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div id="syncFields">
+      <div class="field">
+        <label>GitHub Token</label>
+        <input id="syncToken" type="password" autocomplete="off" placeholder="只勾选 gist 权限">
+      </div>
+      <div class="hint-small">在 github.com/settings/tokens 生成，勾选 gist 一项即可，随时能撤销。</div>
+      <div class="sheet-actions">
+        <button class="btn ghost" id="syncNowBtn">立即同步</button>
+        <button class="btn primary grow" id="syncConnectBtn">连接</button>
+      </div>
+      <div class="sync-state" id="syncState">未连接</div>
+    </div>
   </div>
 </div>
 
@@ -725,8 +758,11 @@ body{
       return [];
     }
   }
+  function touch(it){ it.updatedAt = Date.now(); return it; }
+
   function saveItems(){
     try{ localStorage.setItem(STORE_KEY, JSON.stringify(items)); }catch(e){}
+    scheduleSync();
   }
 
   function loadIdeas(){
@@ -740,6 +776,7 @@ body{
   }
   function saveIdeas(){
     try{ localStorage.setItem(IDEA_KEY, JSON.stringify(ideas)); }catch(e){}
+    scheduleSync();
   }
 
   function sortItems(a, b){
@@ -753,6 +790,7 @@ body{
   function byDateMap(){
     var map = {};
     items.forEach(function(it){
+      if (it.deleted) return;
       if (!map[it.date]) map[it.date] = [];
       map[it.date].push(it);
     });
@@ -828,6 +866,16 @@ body{
   var llmConfig = { enabled: false, hasKey: false, baseUrl: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat' };
   var llmApiKey = '';
   var cachedLLM = { text: '', data: null };
+
+  /* ============ 云同步状态 ============ */
+  var SYNC_KEY = 'lazycal.sync.v1';
+  var SYNC_DESC = '懒人日历数据';
+  var SYNC_FILE = 'lazy-calendar.json';
+  var syncCfg = { enabled: false, token: '', gistId: '' };
+  var syncBusy = false;
+  var syncTimer = null;
+  var syncApplying = false;
+  var syncLastAt = 0;
 
   /* ============ 渲染 ============ */
   function renderCalendar(){
@@ -943,11 +991,11 @@ body{
   }
 
   function renderIdeas(){
-    var sorted = ideas.slice().sort(function(a, b){
+    var sorted = ideas.filter(function(x){ return !x.deleted; }).sort(function(a, b){
       if (!!a.done !== !!b.done) return a.done ? 1 : -1;
       return 0;
     });
-    var undone = ideas.filter(function(x){ return !x.done; }).length;
+    var undone = sorted.filter(function(x){ return !x.done; }).length;
     ideaSub.textContent = undone ? undone + ' 条待办' : '';
     if (!sorted.length){
       ideaList.innerHTML = '<div class="empty">还没有想法</div>';
@@ -1218,8 +1266,200 @@ body{
 
   function openSettings(){
     syncSettingsUI();
+    syncSyncUI();
     settingsModal.classList.add('open');
     loadLLMConfig();
+  }
+
+  /* ============ 云同步（GitHub Gist） ============ */
+  function loadSyncCfg(){
+    try{
+      var raw = localStorage.getItem(SYNC_KEY);
+      if (raw){
+        var c = JSON.parse(raw) || {};
+        syncCfg = {
+          enabled: !!c.enabled,
+          token: c.token || '',
+          gistId: c.gistId || ''
+        };
+      }
+    }catch(e){}
+  }
+
+  function saveSyncCfg(){
+    try{ localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg)); }catch(e){}
+  }
+
+  function setSyncState(text, cls){
+    var el = document.getElementById('syncState');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'sync-state' + (cls ? ' ' + cls : '');
+  }
+
+  function syncHeaders(){
+    return {
+      'Accept': 'application/vnd.github+json',
+      'Authorization': 'Bearer ' + syncCfg.token,
+      'Content-Type': 'application/json'
+    };
+  }
+
+  function ghError(r){
+    if (r.status === 401) return new Error('Token 无效或已过期');
+    if (r.status === 403) return new Error('Token 权限不足，需要勾选 gist');
+    if (r.status === 404) return new Error('找不到同步数据');
+    return new Error('请求失败 ' + r.status);
+  }
+
+  function snapshot(){
+    return JSON.stringify({
+      v: 1,
+      savedAt: Date.now(),
+      items: items,
+      ideas: ideas
+    });
+  }
+
+  function mergeList(local, remote){
+    var map = {};
+    local.forEach(function(x){ if (x && x.id) map[x.id] = x; });
+    remote.forEach(function(x){
+      if (!x || !x.id) return;
+      var cur = map[x.id];
+      if (!cur){ map[x.id] = x; return; }
+      if ((x.updatedAt || 0) > (cur.updatedAt || 0)) map[x.id] = x;
+    });
+    return Object.keys(map).map(function(k){ return map[k]; });
+  }
+
+  function applyRemote(remote){
+    if (!remote || !Array.isArray(remote.items)) return false;
+    var newItems = mergeList(items, remote.items);
+    var newIdeas = mergeList(ideas, Array.isArray(remote.ideas) ? remote.ideas : []);
+    if (JSON.stringify(newItems) === JSON.stringify(items) &&
+        JSON.stringify(newIdeas) === JSON.stringify(ideas)) return false;
+    items = newItems;
+    ideas = newIdeas;
+    syncApplying = true;
+    try{
+      localStorage.setItem(STORE_KEY, JSON.stringify(items));
+      localStorage.setItem(IDEA_KEY, JSON.stringify(ideas));
+    }catch(e){}
+    syncApplying = false;
+    renderAll();
+    return true;
+  }
+
+  async function ghFind(gistId){
+    if (gistId){
+      var r1 = await fetch('https://api.github.com/gists/' + gistId, { headers: syncHeaders() });
+      if (r1.ok) return r1.json();
+    }
+    var r2 = await fetch('https://api.github.com/gists?per_page=100', { headers: syncHeaders() });
+    if (!r2.ok) throw ghError(r2);
+    var list = await r2.json();
+    var hit = (list || []).filter(function(g){ return g.description === SYNC_DESC; })[0];
+    if (!hit) return null;
+    var r3 = await fetch('https://api.github.com/gists/' + hit.id, { headers: syncHeaders() });
+    if (!r3.ok) throw ghError(r3);
+    return r3.json();
+  }
+
+  async function fullSync(manual){
+    if (!syncCfg.enabled || !syncCfg.token){ return; }
+    if (syncBusy) return;
+    syncBusy = true;
+    if (manual) setSyncState('同步中…', '');
+    try{
+      var gist = await ghFind(syncCfg.gistId);
+      var remote = null;
+      if (gist){
+        syncCfg.gistId = gist.id;
+        saveSyncCfg();
+        var f = gist.files && gist.files[SYNC_FILE];
+        if (f && f.content && !f.truncated){
+          try{ remote = JSON.parse(f.content); }catch(e){ remote = null; }
+        }
+      }
+      if (remote) applyRemote(remote);
+
+      var content = snapshot();
+      if (gist){
+        var pr = await fetch('https://api.github.com/gists/' + gist.id, {
+          method: 'PATCH',
+          headers: syncHeaders(),
+          body: JSON.stringify({ files: (function(){ var o = {}; o[SYNC_FILE] = { content: content }; return o; })() })
+        });
+        if (!pr.ok) throw ghError(pr);
+      } else {
+        var files = {}; files[SYNC_FILE] = { content: content };
+        var cr = await fetch('https://api.github.com/gists', {
+          method: 'POST',
+          headers: syncHeaders(),
+          body: JSON.stringify({ description: SYNC_DESC, public: false, files: files })
+        });
+        if (!cr.ok) throw ghError(cr);
+        var created = await cr.json();
+        syncCfg.gistId = created.id;
+        saveSyncCfg();
+      }
+      syncLastAt = Date.now();
+      var t = new Date(syncLastAt);
+      setSyncState('已同步 ' + pad(t.getHours()) + ':' + pad(t.getMinutes()), 'ok');
+    }catch(e){
+      setSyncState(e.message || '同步失败', 'err');
+    }finally{
+      syncBusy = false;
+    }
+  }
+
+  function scheduleSync(){
+    if (!syncCfg.enabled || !syncCfg.token || syncApplying) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(function(){ fullSync(false); }, 1800);
+  }
+
+  function syncSyncUI(){
+    var toggle = document.getElementById('syncToggle');
+    if (!toggle) return;
+    toggle.checked = !!syncCfg.enabled;
+    var tk = document.getElementById('syncToken');
+    tk.value = '';
+    tk.placeholder = syncCfg.token ? '已保存，留空表示不修改' : '只勾选 gist 权限';
+    document.getElementById('syncFields').style.display = syncCfg.enabled ? '' : 'none';
+    if (syncCfg.enabled && syncLastAt){
+      var t = new Date(syncLastAt);
+      setSyncState('已同步 ' + pad(t.getHours()) + ':' + pad(t.getMinutes()), 'ok');
+    } else if (syncCfg.enabled && syncCfg.gistId){
+      setSyncState('已连接', 'ok');
+    } else if (syncCfg.enabled){
+      setSyncState('填 Token 后点连接');
+    }
+  }
+
+  async function connectSync(){
+    var tk = document.getElementById('syncToken').value.trim();
+    if (tk) syncCfg.token = tk;
+    if (!syncCfg.token){ toast('先粘贴 GitHub Token'); return; }
+    syncCfg.enabled = true;
+    saveSyncCfg();
+    setSyncState('连接中…', '');
+    var btn = document.getElementById('syncConnectBtn');
+    btn.disabled = true;
+    try{
+      var r = await fetch('https://api.github.com/user', { headers: syncHeaders() });
+      if (!r.ok) throw ghError(r);
+      syncBusy = false;
+      await fullSync(true);
+      document.getElementById('syncToken').value = '';
+      syncSyncUI();
+      toast('同步已开启');
+    }catch(e){
+      setSyncState(e.message || '连接失败', 'err');
+    }finally{
+      btn.disabled = false;
+    }
   }
 
   /* ============ 增删改 ============ */
@@ -1237,7 +1477,8 @@ body{
       time: p.time,
       slots: p.slots || null,
       done: false,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      updatedAt: Date.now()
     };
     items.push(it);
     saveItems();
@@ -1261,6 +1502,7 @@ body{
     var it = items.find(function(x){ return x.id === id; });
     if (!it) return;
     it.done = !it.done;
+    touch(it);
     saveItems();
     renderAll();
   }
@@ -1290,6 +1532,7 @@ body{
     it.time = eTime.value || null;
     if (it.time) it.slots = null;
     it.note = eNote.value.trim();
+    touch(it);
     saveItems();
     selected = it.date;
     var d = parseDateStr(it.date);
@@ -1301,15 +1544,17 @@ body{
   }
 
   function deleteCurrent(){
-    var idx = items.findIndex(function(x){ return x.id === editId; });
-    if (idx < 0){ closeModal(); return; }
+    var it = items.find(function(x){ return x.id === editId; });
+    if (!it){ closeModal(); return; }
     if (!confirm('删除这条安排？')) return;
-    var removed = items.splice(idx, 1)[0];
+    it.deleted = true;
+    touch(it);
     saveItems();
     closeModal();
     renderAll();
     toast('已删除', '撤销', function(){
-      items.push(removed);
+      it.deleted = false;
+      touch(it);
       saveItems();
       renderAll();
     });
@@ -1420,6 +1665,20 @@ body{
     });
   });
   $('testBtn').addEventListener('click', testLLM);
+
+  $('syncToggle').addEventListener('change', function(){
+    syncCfg.enabled = this.checked;
+    saveSyncCfg();
+    syncSyncUI();
+    if (syncCfg.enabled && syncCfg.token){
+      fullSync(true);
+    }
+  });
+  $('syncConnectBtn').addEventListener('click', connectSync);
+  $('syncNowBtn').addEventListener('click', function(){
+    if (!syncCfg.enabled){ toast('先打开同步开关'); return; }
+    fullSync(true);
+  });
   $('providerSelect').addEventListener('change', function(){
     var p = PROVIDERS[this.value];
     if (!p || !p.url) return;
@@ -1431,7 +1690,7 @@ body{
     e.preventDefault();
     var t = ideaInput.value.trim();
     if (!t) return;
-    ideas.unshift({ id: uid(), text: t, done: false, createdAt: Date.now() });
+    ideas.unshift({ id: uid(), text: t, done: false, createdAt: Date.now(), updatedAt: Date.now() });
     saveIdeas();
     ideaInput.value = '';
     renderIdeas();
@@ -1446,14 +1705,18 @@ body{
     if (idx < 0) return;
     if (btn.getAttribute('data-iact') === 'toggle'){
       ideas[idx].done = !ideas[idx].done;
+      touch(ideas[idx]);
       saveIdeas();
       renderIdeas();
     } else {
-      var removed = ideas.splice(idx, 1)[0];
+      var target = ideas[idx];
+      target.deleted = true;
+      touch(target);
       saveIdeas();
       renderIdeas();
       toast('已删除', '撤销', function(){
-        ideas.splice(idx, 0, removed);
+        target.deleted = false;
+        touch(target);
         saveIdeas();
         renderIdeas();
       });
@@ -1487,6 +1750,7 @@ body{
       if (selected === fmtDate(new Date(Date.now() - DAY))) selected = todayKey;
       renderAll();
     }
+    if (syncCfg.enabled && syncCfg.token) fullSync(false);
   });
 
   // 首屏先出输入框和当天清单，日历放到后面的帧渲染
@@ -1501,6 +1765,11 @@ body{
   });
 
   loadLLMConfig();
+  loadSyncCfg();
+  syncSyncUI();
+  if (syncCfg.enabled && syncCfg.token){
+    setTimeout(function(){ fullSync(false); }, 600);
+  }
 
   /* 手机键盘弹出时，把底部输入栏和编辑面板顶到键盘上方 */
   (function(){
